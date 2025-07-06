@@ -1,7 +1,9 @@
 import zlib
-import json
+import lzma
+import bz2
+import base64
 from pathlib import Path
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 import numpy as np
 import cv2
 from bitpaper.utils import Config
@@ -17,33 +19,25 @@ class BitPaperEncoder:
         self.bits_per_page = self.bits_per_row * self.max_rows
 
     def file_to_bitstream_pages(self, filepath):
-        """Convert file to multiple pages of bitstreams with metadata"""
+        """Optimized encoding with minimal overhead"""
         with open(filepath, 'rb') as f:
             file_data = f.read()
         
-        # Create metadata
-        metadata = {
-            'filename': Path(filepath).name,
-            'original_size': len(file_data),
-            'timestamp': '2024-01-01'
-        }
+        # Create compact metadata (no JSON overhead)
+        filename = Path(filepath).name.encode('utf-8')
+        metadata_header = len(filename).to_bytes(1, 'big') + filename
         
-        # Create data structure with metadata
-        data_structure = {
-            'data': file_data.hex(),  # Store as hex string
-            'metadata': metadata
-        }
+        # Combine data efficiently
+        combined_data = metadata_header + file_data
         
-        # Compress the data structure
-        json_data = json.dumps(data_structure).encode()
-        compressed = zlib.compress(json_data)
+        # Try multiple compression algorithms
+        compressed_data = self._best_compression(combined_data)
         
-        # Convert to bitstream
-        bitstream = ''.join(format(byte, '08b') for byte in compressed)
+        # Convert to bitstream efficiently
+        bitstream = self._bytes_to_bitstream(compressed_data)
         
         # Split into pages
         if self.pretty_mode:
-            # Calculate available space with margins
             available_width = 2480 - (2 * self.margin)
             available_height = 3508 - (2 * self.margin)
             max_cols = available_width // self.cell_size
@@ -52,13 +46,53 @@ class BitPaperEncoder:
         else:
             bits_per_page = self.bits_per_page
         
-        # Split into pages
         pages = []
         for i in range(0, len(bitstream), bits_per_page):
             page_bits = bitstream[i:i + bits_per_page]
             pages.append(page_bits)
         
-        return pages, metadata
+        return pages, {'filename': Path(filepath).name, 'size': len(file_data)}
+
+    def _best_compression(self, data):
+        """Try multiple compression algorithms and pick the best"""
+        algorithms = [
+            ('zlib', lambda d: zlib.compress(d, level=9)),
+            ('lzma', lambda d: lzma.compress(d, preset=9)),
+            ('bz2', lambda d: bz2.compress(d, compresslevel=9))
+        ]
+        
+        best_result = None
+        best_size = float('inf')
+        
+        for name, compressor in algorithms:
+            try:
+                compressed = compressor(data)
+                if len(compressed) < best_size:
+                    best_size = len(compressed)
+                    best_result = (name, compressed)
+            except:
+                continue
+        
+        if best_result is None:
+            # Fallback to zlib
+            return zlib.compress(data, level=9)
+        
+        # Add algorithm identifier
+        algo_id = {'zlib': 0, 'lzma': 1, 'bz2': 2}[best_result[0]]
+        return bytes([algo_id]) + best_result[1]
+
+    def _bytes_to_bitstream(self, data):
+        """Efficient bitstream conversion"""
+        # Pre-allocate the exact size needed
+        total_bits = len(data) * 8
+        bitstream = ['0'] * total_bits
+        
+        for i, byte in enumerate(data):
+            for j in range(8):
+                bit_idx = i * 8 + j
+                bitstream[bit_idx] = '1' if (byte >> (7-j)) & 1 else '0'
+        
+        return ''.join(bitstream)
 
     def file_to_bitstream(self, filepath):
         """Single-page version for backward compatibility"""
@@ -68,28 +102,24 @@ class BitPaperEncoder:
         return pages[0], metadata
 
     def bitstream_to_image(self, bitstream, metadata=None, page_num=1, total_pages=1):
-        """Convert bitstream to image with optional pretty formatting"""
+        """Convert bitstream to image"""
         if self.pretty_mode:
-            return self._bitstream_to_pretty_image(bitstream, page_num, total_pages)
+            return self._bitstream_to_pretty_image(bitstream)
         else:
             return self._bitstream_to_simple_image(bitstream)
 
     def _bitstream_to_simple_image(self, bitstream):
-        """Simple image without margins or formatting"""
+        """Simple image without margins"""
         rows = (len(bitstream) + self.bits_per_row - 1) // self.bits_per_row
         
-        # Use full A4 dimensions
-        a4_width, a4_height = 2480, 3508
-        width = a4_width
-        height = a4_height
-        
+        width, height = 2480, 3508
         img = Image.new("L", (width, height), 255)
         draw = ImageDraw.Draw(img)
         
         # Draw border
         draw.rectangle([0, 0, width - 1, height - 1], outline=0, width=self.border_width)
         
-        # Fill data area
+        # Fill data area efficiently
         for idx, bit in enumerate(bitstream):
             row = idx // self.bits_per_row
             col = idx % self.bits_per_row
@@ -100,29 +130,22 @@ class BitPaperEncoder:
         
         return img
 
-    def _bitstream_to_pretty_image(self, bitstream, page_num=1, total_pages=1):
-        """Pretty image with margins but NO text - only encoded data"""
-        # Calculate available space with margins
+    def _bitstream_to_pretty_image(self, bitstream):
+        """Pretty image with margins"""
         available_width = 2480 - (2 * self.margin)
         available_height = 3508 - (2 * self.margin)
         max_cols = available_width // self.cell_size
         max_rows = available_height // self.cell_size
         
-        rows = (len(bitstream) + max_cols - 1) // max_cols
-        
-        # Use full A4 dimensions
-        a4_width, a4_height = 2480, 3508
-        width = a4_width
-        height = a4_height
-        
+        width, height = 2480, 3508
         img = Image.new("L", (width, height), 255)
         draw = ImageDraw.Draw(img)
         
-        # Draw outer border with margin
+        # Draw border
         draw.rectangle([self.margin, self.margin, width - self.margin, height - self.margin], 
                       outline=0, width=self.border_width)
         
-        # Fill data area (no text, only encoded data)
+        # Fill data area
         for idx, bit in enumerate(bitstream):
             row = idx // max_cols
             col = idx % max_cols
@@ -143,14 +166,12 @@ class BitPaperDecoder:
         self.margin = 100 if pretty_mode else 0
 
     def images_to_bitstream(self, images):
-        """Decode multiple images back to a single bitstream"""
+        """Decode multiple images"""
         combined_bitstream = ""
-        
         for i, image in enumerate(images):
             page_bitstream = self.image_to_bitstream(image)
             combined_bitstream += page_bitstream
             print(f"Page {i+1} decoded: {len(page_bitstream)} bits")
-        
         return combined_bitstream
 
     def image_to_bitstream(self, image, expected_length=None):
@@ -165,20 +186,15 @@ class BitPaperDecoder:
             return self._simple_image_to_bitstream(img_array, expected_length)
 
     def _simple_image_to_bitstream(self, img_array, expected_length=None):
-        """Simple decoding without margins"""
-        # Calculate data area
+        """Simple decoding"""
         data_width = self.bits_per_row * self.cell_size
         data_height = self.max_rows * self.cell_size
         
-        # Extract data region
-        x0 = self.border_width
-        y0 = self.border_width
-        x1 = x0 + data_width
-        y1 = y0 + data_height
+        x0, y0 = self.border_width, self.border_width
+        x1, y1 = x0 + data_width, y0 + data_height
         
         data_region = img_array[y0:y1, x0:x1]
         
-        # Calculate actual rows needed
         if expected_length:
             rows = (expected_length + self.bits_per_row - 1) // self.bits_per_row
         else:
@@ -197,14 +213,12 @@ class BitPaperDecoder:
         return bitstream
 
     def _pretty_image_to_bitstream(self, img_array, expected_length=None):
-        """Pretty decoding with margins but NO title area"""
-        # Calculate available space with margins
+        """Pretty decoding"""
         available_width = 2480 - (2 * self.margin)
         available_height = 3508 - (2 * self.margin)
         max_cols = available_width // self.cell_size
         max_rows = available_height // self.cell_size
         
-        # Extract data region (no title area to skip)
         x0 = self.margin + self.border_width
         y0 = self.margin + self.border_width
         x1 = x0 + (max_cols * self.cell_size)
@@ -212,7 +226,6 @@ class BitPaperDecoder:
         
         data_region = img_array[y0:y1, x0:x1]
         
-        # Calculate actual rows needed
         if expected_length:
             rows = (expected_length + max_cols - 1) // max_cols
         else:
@@ -231,27 +244,35 @@ class BitPaperDecoder:
         return bitstream
 
     def bitstream_to_data(self, bitstream):
-        """Convert bitstream to data with metadata support"""
+        """Optimized decoding"""
+        # Convert bitstream to bytes efficiently
         bytes_data = bytearray()
-        bitstream = bitstream[:len(bitstream) - (len(bitstream) % 8)]
         for i in range(0, len(bitstream), 8):
             byte_str = bitstream[i:i+8]
             if len(byte_str) == 8:
                 byte_val = int(byte_str, 2)
                 bytes_data.append(byte_val)
         
+        # Decompress with algorithm detection
         try:
-            decompressed = zlib.decompress(bytes(bytes_data))
-            data_structure = json.loads(decompressed.decode())
+            algo_id = bytes_data[0]
+            compressed_data = bytes_data[1:]
             
-            # Convert hex string back to bytes
-            original_data = bytes.fromhex(data_structure['data'])
-            metadata = data_structure['metadata']
+            if algo_id == 0:
+                decompressed = zlib.decompress(compressed_data)
+            elif algo_id == 1:
+                decompressed = lzma.decompress(compressed_data)
+            elif algo_id == 2:
+                decompressed = bz2.decompress(compressed_data)
+            else:
+                raise ValueError("Unknown compression algorithm")
             
-            return original_data, metadata
-        except zlib.error:
-            raise ValueError("Failed to decompress data")
-        except json.JSONDecodeError:
-            raise ValueError("Failed to parse metadata")
-        except ValueError:
-            raise ValueError("Failed to convert hex data") 
+            # Extract metadata and data
+            filename_length = decompressed[0]
+            filename = decompressed[1:1+filename_length].decode('utf-8')
+            original_data = decompressed[1+filename_length:]
+            
+            return original_data, {'filename': filename, 'size': len(original_data)}
+            
+        except Exception as e:
+            raise ValueError(f"Failed to decode data: {e}") 

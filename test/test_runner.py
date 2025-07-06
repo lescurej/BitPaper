@@ -7,6 +7,11 @@ import re
 from datetime import datetime
 from pathlib import Path
 import base64
+import multiprocessing
+import concurrent.futures
+import json
+from test.html_template import generate_html_report
+from test.report_generator import generate_camera_matrix_html
 
 from .report_generator import parse_coverage_data, generate_coverage_html, generate_camera_matrix_html
 from .html_template import get_html_template
@@ -260,3 +265,205 @@ def generate_detailed_results_html(detailed_results):
     """
     
     return html
+
+def ultra_fast_run_tests():
+    """Ultra-fast test execution with parallel processing"""
+    print("🚀 Running Ultra-Fast BitPaper Tests")
+    
+    # Use parallel test execution
+    num_workers = min(multiprocessing.cpu_count(), 8)
+    
+    # Define test categories for parallel execution
+    test_categories = [
+        "basic_encoding",
+        "camera_simulation", 
+        "edge_cases",
+        "integration",
+        "performance"
+    ]
+    
+    # Run tests in parallel
+    with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
+        future_to_category = {
+            executor.submit(run_test_category, category): category 
+            for category in test_categories
+        }
+        
+        results = {}
+        for future in concurrent.futures.as_completed(future_to_category):
+            category = future_to_category[future]
+            try:
+                category_results = future.result()
+                results[category] = category_results
+            except Exception as e:
+                print(f"❌ {category} tests failed: {e}")
+                results[category] = {"passed": 0, "failed": 1, "skipped": 0}
+    
+    return aggregate_results(results)
+
+def run_test_category(category):
+    """Run tests for a specific category"""
+    cmd = [
+        "python", "-m", "pytest", 
+        f"test/test_{category}.py", 
+        "-v", "--tb=short",
+        "--durations=10"
+    ]
+    
+    env = {"PYTHONPATH": "."}
+    
+    try:
+        result = subprocess.run(
+            cmd, 
+            capture_output=True, 
+            text=True, 
+            env=env,
+            timeout=300  # 5 minute timeout
+        )
+        
+        return parse_test_output(result.stdout, category)
+        
+    except subprocess.TimeoutExpired:
+        return {"passed": 0, "failed": 1, "skipped": 0, "timeout": True}
+    except Exception as e:
+        return {"passed": 0, "failed": 1, "skipped": 0, "error": str(e)}
+
+def parse_test_output(output, category):
+    """Ultra-fast test output parsing using regex"""
+    # Use compiled regex for faster parsing
+    test_pattern = re.compile(r'(\w+::\w+::\w+)\s+(PASSED|FAILED|SKIPPED)')
+    
+    results = {"passed": 0, "failed": 0, "skipped": 0}
+    test_details = []
+    
+    # Parse all tests at once
+    matches = test_pattern.findall(output)
+    
+    for test_name, status in matches:
+        if status == "PASSED":
+            results["passed"] += 1
+        elif status == "FAILED":
+            results["failed"] += 1
+        elif status == "SKIPPED":
+            results["skipped"] += 1
+        
+        test_details.append({
+            "name": test_name,
+            "status": status.lower(),
+            "category": category
+        })
+    
+    results["details"] = test_details
+    return results
+
+def aggregate_results(category_results):
+    """Aggregate results from all categories"""
+    total_results = {
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "skipped": 0,
+        "categories": category_results
+    }
+    
+    for category, results in category_results.items():
+        total_results["total"] += results.get("passed", 0) + results.get("failed", 0) + results.get("skipped", 0)
+        total_results["passed"] += results.get("passed", 0)
+        total_results["failed"] += results.get("failed", 0)
+        total_results["skipped"] += results.get("skipped", 0)
+    
+    return total_results
+
+def generate_optimized_report(results, timestamp):
+    """Generate optimized HTML report"""
+    # Generate test rows efficiently
+    test_rows = []
+    for category, category_results in results["categories"].items():
+        for test_detail in category_results.get("details", []):
+            test_rows.append(f"""
+                <tr>
+                    <td>{test_detail['name']}</td>
+                    <td><span class="status {test_detail['status']}">{test_detail['status']}</span></td>
+                    <td>{test_detail['category']}</td>
+                </tr>
+            """)
+    
+    # Generate coverage HTML (simplified)
+    coverage_html = f"""
+        <div class="coverage-summary">
+            <div class="coverage-item">
+                <div class="coverage-number">{results['passed']}</div>
+                <div class="label">Passed</div>
+            </div>
+            <div class="coverage-item">
+                <div class="coverage-number">{results['failed']}</div>
+                <div class="label">Failed</div>
+            </div>
+            <div class="coverage-item">
+                <div class="coverage-number">{results['skipped']}</div>
+                <div class="label">Skipped</div>
+            </div>
+            <div class="coverage-item">
+                <div class="coverage-number">{results['total']}</div>
+                <div class="label">Total</div>
+            </div>
+        </div>
+    """
+    
+    # Generate camera matrix HTML
+    camera_images_html = generate_camera_matrix_html()
+    
+    # Generate final HTML report
+    html_content = generate_html_report(
+        timestamp=timestamp,
+        passed=results["passed"],
+        failed=results["failed"], 
+        skipped=results["skipped"],
+        total=results["total"],
+        coverage_html=coverage_html,
+        test_rows="\n".join(test_rows),
+        a4_results_html="",
+        detailed_results_html="",
+        camera_images_html=camera_images_html
+    )
+    
+    return html_content
+
+def main():
+    """Main test runner with ultra-fast execution"""
+    import time
+    
+    start_time = time.time()
+    
+    # Run tests with parallel execution
+    results = ultra_fast_run_tests()
+    
+    end_time = time.time()
+    execution_time = end_time - start_time
+    
+    print(f"\n🚀 Test Execution Summary:")
+    print(f"   Total tests: {results['total']}")
+    print(f"   Passed: {results['passed']}")
+    print(f"   Failed: {results['failed']}")
+    print(f"   Skipped: {results['skipped']}")
+    print(f"   Execution time: {execution_time:.2f}s")
+    
+    # Generate optimized report
+    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    html_content = generate_optimized_report(results, timestamp)
+    
+    # Save report
+    report_path = "test_results.html"
+    with open(report_path, "w") as f:
+        f.write(html_content)
+    
+    print(f"   Report saved: {report_path}")
+    
+    # Open report
+    os.system(f"open {report_path}")
+    
+    return results["failed"] == 0
+
+if __name__ == "__main__":
+    success = main()
+    exit(0 if success else 1)
