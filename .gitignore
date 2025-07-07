@@ -24,4 +24,5 @@ MANIFEST
 htmlcov/
 .DS_Store
 test_images/
-encoded.pdf
+encoded*.pdf
+decoded*.pdf
